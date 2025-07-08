@@ -40,6 +40,31 @@ class YNABBulkRename:
         except re.error as e:
             raise ValueError(f"Invalid regex pattern '{pattern}': {e}")
 
+    def _handle_rate_limit_response(self, response) -> bool:
+        """
+        Handle rate limit response and wait if necessary.
+
+        Args:
+            response: The HTTP response object
+
+        Returns:
+            True if we should retry, False otherwise
+        """
+        if response.status_code == 429:
+            # Check if there's a Retry-After header
+            retry_after = response.headers.get("Retry-After")
+            if retry_after:
+                wait_time = int(retry_after)
+                print(f"⚠️  Rate limit exceeded. Waiting {wait_time} seconds...")
+                time.sleep(wait_time)
+                return True
+            else:
+                # Default wait time if no Retry-After header
+                print("⚠️  Rate limit exceeded. Waiting 60 seconds...")
+                time.sleep(60)
+                return True
+        return False
+
     def get_payees(self) -> List[Dict]:
         """
         Get all payees for the specified budget.
@@ -49,16 +74,59 @@ class YNABBulkRename:
         """
         url = f"{self.base_url}/budgets/{self.budget_id}/payees"
 
-        try:
-            response = requests.get(url, headers=self.headers)
-            response.raise_for_status()
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                response = requests.get(url, headers=self.headers)
 
-            data = response.json()
-            return data.get("data", {}).get("payees", [])
+                # Handle rate limiting
+                if response.status_code == 429:
+                    if attempt < max_retries - 1:  # Don't retry on last attempt
+                        if self._handle_rate_limit_response(response):
+                            continue
+                    else:
+                        print("❌ Rate limit exceeded. Maximum retries reached.")
+                        return []
 
-        except requests.RequestException as e:
-            print(f"Error fetching payees: {e}")
-            return []
+                # Handle other HTTP errors
+                if response.status_code == 401:
+                    print("❌ Authentication failed. Please check your YNAB_TOKEN.")
+                    return []
+                elif response.status_code == 403:
+                    print("❌ Access forbidden. Please check your token permissions.")
+                    return []
+                elif response.status_code == 404:
+                    print(
+                        f"❌ Budget not found. Please check your budget ID: {self.budget_id}"
+                    )
+                    return []
+
+                response.raise_for_status()
+
+                data = response.json()
+                return data.get("data", {}).get("payees", [])
+
+            except requests.ConnectionError:
+                print(f"❌ Connection error. Attempt {attempt + 1}/{max_retries}")
+                if attempt < max_retries - 1:
+                    time.sleep(2**attempt)  # Exponential backoff
+                    continue
+                else:
+                    print("❌ Connection failed after all retries.")
+                    return []
+            except requests.Timeout:
+                print(f"❌ Request timeout. Attempt {attempt + 1}/{max_retries}")
+                if attempt < max_retries - 1:
+                    time.sleep(2**attempt)  # Exponential backoff
+                    continue
+                else:
+                    print("❌ Request timed out after all retries.")
+                    return []
+            except requests.RequestException as e:
+                print(f"❌ Error fetching payees: {e}")
+                return []
+
+        return []
 
     def update_payee(self, payee_id: str, new_name: str) -> bool:
         """
@@ -72,19 +140,74 @@ class YNABBulkRename:
             True if successful, False otherwise
         """
         url = f"{self.base_url}/budgets/{self.budget_id}/payees/{payee_id}"
-
         payload = {"payee": {"name": new_name}}
 
-        try:
-            response = requests.patch(url, headers=self.headers, json=payload)
-            response.raise_for_status()
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                response = requests.patch(url, headers=self.headers, json=payload)
 
-            print(f"Successfully renamed payee to: {new_name}")
-            return True
+                # Handle rate limiting
+                if response.status_code == 429:
+                    if attempt < max_retries - 1:  # Don't retry on last attempt
+                        if self._handle_rate_limit_response(response):
+                            continue
+                    else:
+                        print(
+                            f"❌ Rate limit exceeded for payee {payee_id}. Maximum retries reached."
+                        )
+                        return False
 
-        except requests.RequestException as e:
-            print(f"Error updating payee {payee_id}: {e}")
-            return False
+                # Handle other HTTP errors
+                if response.status_code == 401:
+                    print("❌ Authentication failed. Please check your YNAB_TOKEN.")
+                    return False
+                elif response.status_code == 403:
+                    print("❌ Access forbidden. Please check your token permissions.")
+                    return False
+                elif response.status_code == 404:
+                    print(f"❌ Payee not found: {payee_id}")
+                    return False
+                elif response.status_code == 400:
+                    print(
+                        f"❌ Bad request for payee {payee_id}. Check payee name: '{new_name}'"
+                    )
+                    return False
+
+                response.raise_for_status()
+
+                print(f"✅ Successfully renamed payee to: {new_name}")
+                return True
+
+            except requests.ConnectionError:
+                print(
+                    f"❌ Connection error updating payee {payee_id}. Attempt {attempt + 1}/{max_retries}"
+                )
+                if attempt < max_retries - 1:
+                    time.sleep(2**attempt)  # Exponential backoff
+                    continue
+                else:
+                    print(
+                        f"❌ Connection failed for payee {payee_id} after all retries."
+                    )
+                    return False
+            except requests.Timeout:
+                print(
+                    f"❌ Request timeout for payee {payee_id}. Attempt {attempt + 1}/{max_retries}"
+                )
+                if attempt < max_retries - 1:
+                    time.sleep(2**attempt)  # Exponential backoff
+                    continue
+                else:
+                    print(
+                        f"❌ Request timed out for payee {payee_id} after all retries."
+                    )
+                    return False
+            except requests.RequestException as e:
+                print(f"❌ Error updating payee {payee_id}: {e}")
+                return False
+
+        return False
 
     def generate_new_name(self, original_name: str) -> str:
         """
@@ -139,6 +262,9 @@ class YNABBulkRename:
         if not dry_run:
             if skip_pause:
                 print("⚡ Skipping pauses between API calls (--skip-pause enabled)")
+                print(
+                    "⚠️  Warning: This may cause rate limiting if you have many payees!"
+                )
             elif len(matching_payees) < 199:
                 print(
                     f"⚡ No pauses needed - {len(matching_payees)} payees is under rate limit (199)"
@@ -154,6 +280,10 @@ class YNABBulkRename:
                 print("    (20 second pause between each rename to stay within limits)")
             print()
 
+        successful_renames = 0
+        consecutive_failures = 0
+        max_consecutive_failures = 5
+
         for i, payee in enumerate(matching_payees):
             payee_id = payee.get("id")
             original_name = payee.get("name", "")
@@ -162,8 +292,24 @@ class YNABBulkRename:
             print(f"  - {original_name} -> {new_name}")
 
             if not dry_run:
-                self.update_payee(payee_id, new_name)
-                # Add a 20-second pause between each API call if needed
+                success = self.update_payee(payee_id, new_name)
+
+                if success:
+                    successful_renames += 1
+                    consecutive_failures = 0
+                else:
+                    consecutive_failures += 1
+                    if consecutive_failures >= max_consecutive_failures:
+                        print(
+                            f"❌ Stopping after {max_consecutive_failures} consecutive failures."
+                        )
+                        print(
+                            f"   Successfully renamed {successful_renames} out of {i + 1} payees."
+                        )
+                        print("   This might be due to rate limiting or API issues.")
+                        return
+
+                # Add a pause between each API call if needed
                 if (
                     should_pause and i < len(matching_payees) - 1
                 ):  # Don't pause after the last one
@@ -177,7 +323,15 @@ class YNABBulkRename:
                 "\n🔍 This was a dry run. To actually rename the payees, add --no-dry-run"
             )
         else:
-            print(f"\n✅ Successfully processed {len(matching_payees)} payees!")
+            if successful_renames == len(matching_payees):
+                print(f"\n✅ Successfully processed all {successful_renames} payees!")
+            else:
+                failed_count = len(matching_payees) - successful_renames
+                print(
+                    f"\n⚠️  Processed {successful_renames} out of {len(matching_payees)} payees."
+                )
+                print(f"   {failed_count} failed due to errors.")
+                print("   Check the error messages above for details.")
 
 
 def parse_args():

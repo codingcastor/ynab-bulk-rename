@@ -136,8 +136,39 @@ Successfully renamed payee to: GROCERY STORE
 - **Error Handling**: Includes proper error handling for API requests and invalid regex patterns
 - **Pattern Validation**: Validates regex patterns before processing
 - **Intelligent Rate Limiting**: Automatically skips pauses when processing <199 payees (within rate limit)
+- **Rate Limit Recovery**: Handles HTTP 429 responses with automatic retry and backoff
+- **Failure Protection**: Stops processing after 5 consecutive failures to prevent API abuse
 - **Manual Pause Control**: `--skip-pause` option to override rate limiting (use with caution)
 - **Graceful Interruption**: Can be cancelled safely with Ctrl+C
+
+## Error Handling
+
+The tool includes robust error handling for common API issues:
+
+### Rate Limiting (HTTP 429)
+- Automatically detects rate limit responses
+- Waits according to `Retry-After` header (or 60 seconds default)
+- Retries up to 3 times per request
+- Stops processing after 5 consecutive failures
+
+### Authentication Errors
+- **401 Unauthorized**: Invalid or expired YNAB_TOKEN
+- **403 Forbidden**: Token lacks required permissions
+- **404 Not Found**: Budget or payee not found
+
+### Network Issues
+- **Connection Errors**: Retries with exponential backoff
+- **Timeouts**: Retries with increasing delays
+- **Other Network Issues**: Graceful error reporting
+
+### Example Error Output
+```
+⚠️  Rate limit exceeded. Waiting 60 seconds...
+❌ Authentication failed. Please check your YNAB_TOKEN.
+❌ Stopping after 5 consecutive failures.
+   Successfully renamed 15 out of 20 payees.
+   This might be due to rate limiting or API issues.
+```
 
 ## Performance Notes
 
