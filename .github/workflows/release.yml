@@ -1,0 +1,164 @@
+name: Release
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write  # To create releases and push tags
+      id-token: write  # For PyPI trusted publishing
+      
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # Fetch all history for semantic-release
+        token: ${{ secrets.GITHUB_TOKEN }}
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: "3.10"
+    
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: "18"
+    
+    - name: Install semantic-release
+      run: |
+        npm install -g semantic-release@22
+        npm install -g @semantic-release/changelog@6
+        npm install -g @semantic-release/git@10
+        npm install -g @semantic-release/github@9
+        npm install -g @semantic-release/exec@6
+    
+    - name: Install Python dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install build toml
+    
+    - name: Create version update script
+      run: |
+        cat > update_version.py << 'EOF'
+        import sys
+        import re
+        import toml
+        
+        def update_version(new_version):
+            # Update __version__ in Python file
+            with open('ynab_bulk_rename.py', 'r') as f:
+                content = f.read()
+            
+            # Replace version
+            content = re.sub(
+                r'__version__ = "[^"]*"',
+                f'__version__ = "{new_version}"',
+                content
+            )
+            
+            with open('ynab_bulk_rename.py', 'w') as f:
+                f.write(content)
+            
+            # Update pyproject.toml
+            with open('pyproject.toml', 'r') as f:
+                config = toml.load(f)
+            
+            config['project']['version'] = new_version
+            
+            with open('pyproject.toml', 'w') as f:
+                toml.dump(config, f)
+            
+            print(f"Updated version to {new_version}")
+        
+        if __name__ == "__main__":
+            update_version(sys.argv[1])
+        EOF
+    
+    - name: Run semantic-release
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        # Create .releaserc.json config
+        cat > .releaserc.json << 'EOF'
+        {
+          "branches": ["main"],
+          "plugins": [
+            ["@semantic-release/commit-analyzer", {
+              "preset": "conventionalcommits",
+              "releaseRules": [
+                {"type": "feat", "release": "minor"},
+                {"type": "fix", "release": "patch"},
+                {"type": "perf", "release": "patch"},
+                {"type": "revert", "release": "patch"},
+                {"type": "docs", "release": false},
+                {"type": "style", "release": false},
+                {"type": "chore", "release": false},
+                {"type": "refactor", "release": "patch"},
+                {"type": "test", "release": false},
+                {"type": "build", "release": false},
+                {"type": "ci", "release": false},
+                {"scope": "no-release", "release": false}
+              ]
+            }],
+            ["@semantic-release/release-notes-generator", {
+              "preset": "conventionalcommits",
+              "presetConfig": {
+                "types": [
+                  {"type": "feat", "section": "🚀 Features"},
+                  {"type": "fix", "section": "🐛 Bug Fixes"},
+                  {"type": "perf", "section": "⚡ Performance"},
+                  {"type": "revert", "section": "⏪ Reverts"},
+                  {"type": "refactor", "section": "♻️ Refactoring"},
+                  {"type": "docs", "section": "📚 Documentation", "hidden": true},
+                  {"type": "style", "section": "💎 Styles", "hidden": true},
+                  {"type": "chore", "section": "🔧 Chores", "hidden": true},
+                  {"type": "test", "section": "🧪 Tests", "hidden": true},
+                  {"type": "build", "section": "🏗️ Build", "hidden": true},
+                  {"type": "ci", "section": "👷 CI", "hidden": true}
+                ]
+              }
+            }],
+            ["@semantic-release/changelog", {
+              "changelogFile": "CHANGELOG.md",
+              "changelogTitle": "# Changelog\n\nAll notable changes to this project will be documented in this file."
+            }],
+            ["@semantic-release/exec", {
+              "prepareCmd": "python update_version.py ${nextRelease.version}"
+            }],
+            ["@semantic-release/git", {
+              "assets": ["ynab_bulk_rename.py", "pyproject.toml", "CHANGELOG.md"],
+              "message": "chore(release): ${nextRelease.version} [skip ci]\n\n${nextRelease.notes}"
+            }],
+            ["@semantic-release/github", {
+              "successComment": "🎉 This ${issue.pull_request ? 'PR is included' : 'issue has been resolved'} in version ${nextRelease.version}",
+              "labels": ["released"],
+              "releasedLabels": ["released"]
+            }]
+          ]
+        }
+        EOF
+        
+        # Run semantic-release
+        npx semantic-release
+    
+    - name: Check if release was created
+      id: check_release
+      run: |
+        if git describe --tags --exact-match HEAD 2>/dev/null; then
+          echo "release_created=true" >> $GITHUB_OUTPUT
+        else
+          echo "release_created=false" >> $GITHUB_OUTPUT
+        fi
+    
+    - name: Build and publish to PyPI
+      if: steps.check_release.outputs.release_created == 'true'
+      run: |
+        python -m build
+        
+    - name: Publish to PyPI
+      if: steps.check_release.outputs.release_created == 'true'
+      uses: pypa/gh-action-pypi-publish@release/v1 

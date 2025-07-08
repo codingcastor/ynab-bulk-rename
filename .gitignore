@@ -9,4 +9,8 @@ wheels/
 # Virtual environments
 .venv
 .env
+
+# Semantic Release (created during workflow)
+.releaserc.json
+update_version.py
 PUBLISH_CHECKLIST.md
